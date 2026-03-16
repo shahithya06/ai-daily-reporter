@@ -1,0 +1,370 @@
+{
+  "name": "AI Daily Reporting Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "1a2b3c4d-0001-0001-0001-000000000001",
+      "name": "Daily Trigger 7AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [180, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT date, revenue, new_users, churn_rate, active_sessions FROM daily_metrics WHERE date = CURRENT_DATE - INTERVAL '1 day'",
+        "additionalFields": {}
+      },
+      "id": "1a2b3c4d-0002-0002-0002-000000000002",
+      "name": "Database Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [420, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_POSTGRES_CRED_ID",
+          "name": "Production DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "deal",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 100,
+        "additionalFields": {}
+      },
+      "id": "1a2b3c4d-0003-0003-0003-000000000003",
+      "name": "CRM HubSpot Deals",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [420, 400],
+      "credentials": {
+        "hubspotApi": {
+          "id": "REPLACE_HUBSPOT_CRED_ID",
+          "name": "HubSpot CRM"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "report",
+        "viewId": "REPLACE_GA_VIEW_ID",
+        "returnAll": false,
+        "limit": 10,
+        "additionalFields": {
+          "dateRanges": [
+            {
+              "startDate": "yesterday",
+              "endDate": "yesterday"
+            }
+          ],
+          "metrics": "ga:sessions,ga:pageviews,ga:bounceRate,ga:goalCompletionsAll",
+          "dimensions": "ga:source,ga:medium"
+        }
+      },
+      "id": "1a2b3c4d-0004-0004-0004-000000000004",
+      "name": "Google Analytics",
+      "type": "n8n-nodes-base.googleAnalytics",
+      "typeVersion": 1,
+      "position": [420, 600],
+      "credentials": {
+        "googleAnalyticsOAuth2": {
+          "id": "REPLACE_GA_CRED_ID",
+          "name": "Google Analytics OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      },
+      "id": "1a2b3c4d-0005-0005-0005-000000000005",
+      "name": "Merge Data Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all();\n\nconst dbData = allItems[0] ? allItems[0].json : {};\nconst crmData = allItems[1] ? allItems[1].json : {};\nconst gaData = allItems[2] ? allItems[2].json : {};\n\nconst now = new Date();\nconst yesterday = new Date(now.getTime() - 86400000);\nconst reportDate = yesterday.toISOString().split('T')[0];\n\nconst dealsArray = Array.isArray(crmData) ? crmData : [];\nconst wonDeals = dealsArray.filter(function(d) {\n  return d.properties && d.properties.dealstage === 'closedwon';\n});\nconst lostDeals = dealsArray.filter(function(d) {\n  return d.properties && d.properties.dealstage === 'closedlost';\n});\nconst pipelineValue = dealsArray.reduce(function(sum, d) {\n  return sum + parseFloat((d.properties && d.properties.amount) ? d.properties.amount : 0);\n}, 0);\n\nconst mcpPayload = {\n  metadata: {\n    report_date: reportDate,\n    generated_at: now.toISOString(),\n    sources: ['postgres_database', 'hubspot_crm', 'google_analytics']\n  },\n  product_metrics: {\n    revenue: dbData.revenue || 0,\n    new_users: dbData.new_users || 0,\n    churn_rate: dbData.churn_rate || 0,\n    active_sessions: dbData.active_sessions || 0\n  },\n  sales_pipeline: {\n    deals_won: wonDeals.length,\n    deals_lost: lostDeals.length,\n    total_pipeline_value: pipelineValue,\n    total_deals_pulled: dealsArray.length\n  },\n  web_analytics: {\n    sessions: gaData['ga:sessions'] || 0,\n    pageviews: gaData['ga:pageviews'] || 0,\n    bounce_rate: gaData['ga:bounceRate'] || 0,\n    goal_completions: gaData['ga:goalCompletionsAll'] || 0\n  },\n  report_instructions: {\n    tone: 'professional and concise',\n    required_sections: ['Executive Highlights', 'Areas of Concern', 'Key Trends', 'Recommendations'],\n    max_words: 400\n  }\n};\n\nreturn [{ json: mcpPayload }];"
+      },
+      "id": "1a2b3c4d-0006-0006-0006-000000000006",
+      "name": "MCP Context Builder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 400]
+    },
+    {
+      "parameters": {
+        "authentication": "apiKey",
+        "model": "claude-sonnet-4-6",
+        "messages": {
+          "values": [
+            {
+              "role": "user",
+              "content": "=You are a senior business analyst. Analyze the data below and write a daily performance report.\n\nData:\n{{ JSON.stringify($json, null, 2) }}\n\nWrite a structured report with exactly these four sections:\n1. Executive Highlights - Top 3 positive metrics or wins from the data\n2. Areas of Concern - Anything negative or trending poorly\n3. Key Trends - Cross-source patterns worth noting\n4. Recommendations - 2 to 3 clear actionable next steps\n\nUse actual numbers from the data. Be specific. Keep the total report under 400 words. Tone: professional and concise."
+            }
+          ]
+        },
+        "options": {
+          "maxTokensToSample": 1024,
+          "temperature": 0.3
+        }
+      },
+      "id": "1a2b3c4d-0007-0007-0007-000000000007",
+      "name": "Claude AI Narrative",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.2,
+      "position": [1160, 400],
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_ANTHROPIC_CRED_ID",
+          "name": "Anthropic Claude"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nlet narrative = '';\nif (input.content && Array.isArray(input.content)) {\n  narrative = input.content.map(function(c) { return c.text || ''; }).join('');\n} else if (input.text) {\n  narrative = input.text;\n} else if (typeof input === 'string') {\n  narrative = input;\n} else {\n  narrative = JSON.stringify(input);\n}\n\nconst now = new Date();\nconst yesterday = new Date(now.getTime() - 86400000);\nconst reportDate = yesterday.toISOString().split('T')[0];\nconst isFriday = now.getDay() === 5;\n\nconst preview = narrative.length > 280 ? narrative.substring(0, 280) + '...' : narrative;\n\nreturn [{\n  json: {\n    report_date: reportDate,\n    is_friday: isFriday,\n    narrative: narrative,\n    slack_preview: preview,\n    email_subject: 'Daily Performance Report - ' + reportDate,\n    generated_at: now.toISOString()\n  }\n}];"
+      },
+      "id": "1a2b3c4d-0008-0008-0008-000000000008",
+      "name": "Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_friday }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "1a2b3c4d-0009-0009-0009-000000000009",
+      "name": "Is Friday",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1640, 400]
+    },
+    {
+      "parameters": {
+        "fromEmail": "reports@yourcompany.com",
+        "toEmail": "leadership@yourcompany.com",
+        "subject": "={{ $json.email_subject }}",
+        "emailType": "text",
+        "text": "={{ $json.narrative }}\n\n---\nAuto-generated by AI Reporting Pipeline\nGenerated: {{ $json.generated_at }}"
+      },
+      "id": "1a2b3c4d-0010-0010-0010-000000000010",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1880, 260],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_SMTP_CRED_ID",
+          "name": "SMTP Email"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "value": "REPLACE_SLACK_CHANNEL_ID",
+          "cachedResultName": "#daily-reports"
+        },
+        "text": "=*Daily Performance Report — {{ $json.report_date }}*\n\n{{ $json.slack_preview }}\n\n_Full report emailed to leadership._",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "id": "1a2b3c4d-0011-0011-0011-000000000011",
+      "name": "Slack Full Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1880, 460],
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "REPLACE_SLACK_CRED_ID",
+          "name": "Slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "value": "REPLACE_SLACK_CHANNEL_ID",
+          "cachedResultName": "#daily-reports"
+        },
+        "text": "=*Daily Pulse — {{ $json.report_date }}*\n\n{{ $json.slack_preview }}\n\n_Full weekly report drops every Friday._",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "id": "1a2b3c4d-0012-0012-0012-000000000012",
+      "name": "Slack Daily Pulse",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1880, 620],
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "REPLACE_SLACK_CRED_ID",
+          "name": "Slack"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Trigger 7AM": {
+      "main": [
+        [
+          {
+            "node": "Database Metrics",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CRM HubSpot Deals",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Database Metrics": {
+      "main": [
+        [
+          {
+            "node": "Merge Data Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM HubSpot Deals": {
+      "main": [
+        [
+          {
+            "node": "Merge Data Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Google Analytics": {
+      "main": [
+        [
+          {
+            "node": "Merge Data Sources",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Data Sources": {
+      "main": [
+        [
+          {
+            "node": "MCP Context Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Context Builder": {
+      "main": [
+        [
+          {
+            "node": "Claude AI Narrative",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude AI Narrative": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report": {
+      "main": [
+        [
+          {
+            "node": "Is Friday",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Friday": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack Full Report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack Daily Pulse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "versionId": "abc12345-0000-0000-0000-000000000001"
+}
